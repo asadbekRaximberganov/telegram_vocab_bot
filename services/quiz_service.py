@@ -1,139 +1,91 @@
-from aiogram import Router, F
-from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery
-
-from database import get_or_create_user, save_quiz_result
-from keyboards.user_keyboards import (
-    after_quiz_keyboard,
-    main_menu_keyboard,
-    quiz_options_keyboard,
-)
-from services.quiz_service import get_motivation_message
-from states.quiz_states import QuizStates
-
-router = Router()
+import random
+from typing import List, Dict
 
 
-@router.callback_query(QuizStates.answering, F.data.startswith("answer_"))
-async def process_answer(callback: CallbackQuery, state: FSMContext):
-    """Quiz javobini qayta ishlash"""
-    parts = callback.data.split("_")
-    q_idx = int(parts[1])
-    a_idx = int(parts[2])
+def generate_quiz_questions(
+    words: List[Dict], all_words: List[Dict]
+) -> List[Dict]:
+    """
+    So'zlar ro'yxatidan quiz savollari yaratish.
 
-    data          = await state.get_data()
-    questions     = data.get("questions", [])
-    current_index = data.get("current_index", 0)
-    correct       = data.get("correct", 0)
-    wrong         = data.get("wrong", 0)
+    Har bir savol uchun yo'nalish tasodifiy tanlanadi:
+      A) Inglizcha so'z ko'rsatiladi  → 4 ta O'ZBEKCHA variant
+      B) O'zbekcha tarjima ko'rsatiladi → 4 ta INGLIZCHA variant
+    """
+    if not words:
+        return []
 
-    if q_idx != current_index:
-        await callback.answer("⚠️ Bu savol allaqachon javob berilgan!", show_alert=True)
-        return
+    # To'liq pool — noto'g'ri variantlar uchun
+    all_eng_pool = list({w["word"]        for w in all_words})
+    all_uzb_pool = list({w["translation"] for w in all_words})
 
-    if q_idx >= len(questions):
-        await callback.answer()
-        return
+    questions: List[Dict] = []
 
-    question       = questions[q_idx]
-    chosen_option  = question["options"][a_idx]
-    correct_answer = question["correct_answer"]
-    is_correct     = chosen_option == correct_answer
+    for item in words:
+        eng = item["word"]
+        uzb = item["translation"]
 
-    if is_correct:
-        correct += 1
-        feedback = (
-            f"✅ <b>To'g'ri!</b>\n\n"
-            f"🔤 {question['word']} = <b>{question['translation']}</b>"
-        )
+        if random.random() < 0.5:
+            # ── A: Inglizcha → O'zbekcha ────────────────────────────────────
+            # Savol: inglizcha so'z | Javoblar: o'zbekcha tarjimalar
+            wrong_pool = [t for t in all_uzb_pool if t != uzb]
+
+            if len(wrong_pool) < 3:
+                extra = [w["translation"] for w in words if w["translation"] != uzb]
+                wrong_pool = list({*wrong_pool, *extra})
+
+            while len(wrong_pool) < 3:
+                wrong_pool.append("noma'lum")
+
+            wrong_3 = random.sample(wrong_pool, 3)
+            options = [uzb] + wrong_3
+            random.shuffle(options)
+
+            questions.append({
+                "show":           eng,
+                "show_label":     "🔤 So'z",
+                "correct_answer": uzb,
+                "options":        options,
+                "word":           eng,
+                "translation":    uzb,
+            })
+
+        else:
+            # ── B: O'zbekcha → Inglizcha ────────────────────────────────────
+            # Savol: o'zbekcha tarjima | Javoblar: inglizcha so'zlar
+            wrong_pool = [w for w in all_eng_pool if w != eng]
+
+            if len(wrong_pool) < 3:
+                extra = [w["word"] for w in words if w["word"] != eng]
+                wrong_pool = list({*wrong_pool, *extra})
+
+            while len(wrong_pool) < 3:
+                wrong_pool.append("unknown")
+
+            wrong_3 = random.sample(wrong_pool, 3)
+            options = [eng] + wrong_3
+            random.shuffle(options)
+
+            questions.append({
+                "show":           uzb,
+                "show_label":     "📝 Tarjima",
+                "correct_answer": eng,
+                "options":        options,
+                "word":           eng,
+                "translation":    uzb,
+            })
+
+    random.shuffle(questions)
+    return questions
+
+
+def get_motivation_message(percentage: float) -> str:
+    """Natijaga qarab motivatsion xabar qaytarish"""
+    if percentage >= 90:
+        return "🏆 A'lo natija! Zo'r!"
+    elif percentage >= 70:
+        return "👍 Yaxshi natija!"
+    elif percentage >= 50:
+        return "💪 Yomon emas, yana mashq qiling."
     else:
-        wrong += 1
-        feedback = (
-            f"❌ <b>Noto'g'ri!</b>\n\n"
-            f"🔤 So'z: {question['word']}\n"
-            f"✅ To'g'ri javob: <b>{correct_answer}</b>\n"
-            f"Siz tanladingiz: {chosen_option}"
-        )
-
-    next_index = current_index + 1
-    total      = len(questions)
-
-    # Tugmalarni o'chirish — xatolikni e'tiborsiz qoldirish
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-
-    await state.update_data(correct=correct, wrong=wrong, current_index=next_index)
-
-    if next_index < total:
-        await callback.message.answer(
-            feedback + f"\n\n📊 <i>{correct + wrong}/{total}</i>",
-            parse_mode="HTML",
-        )
-        nq    = questions[next_index]
-        label = nq.get("show_label", "🔤 So'z")
-        show  = nq.get("show", nq["word"])
-        hint  = "So'zini tanlang:" if label == "📝 Tarjima" else "Tarjimasini tanlang:"
-        await callback.message.answer(
-            f"❓ <b>Savol {next_index + 1}/{total}</b>\n\n"
-            f"{label}: <b>{show}</b>\n\n"
-            f"{hint}",
-            reply_markup=quiz_options_keyboard(nq["options"], next_index),
-            parse_mode="HTML",
-        )
-    else:
-        percentage = (correct / total * 100) if total else 0
-        motivation = get_motivation_message(percentage)
-
-        try:
-            user_id = await get_or_create_user(
-                telegram_id=callback.from_user.id,
-                username=callback.from_user.username or "",
-                full_name=callback.from_user.full_name or "",
-            )
-            await save_quiz_result(
-                user_id=user_id,
-                book_id=data.get("book_id"),
-                page_from=data.get("page_from"),
-                page_to=data.get("page_to"),
-                total=total,
-                correct=correct,
-                wrong=wrong,
-                percentage=round(percentage, 1),
-            )
-        except Exception as e:
-            print(f"Natijani saqlashda xatolik: {e}")
-
-        await callback.message.answer(feedback, parse_mode="HTML")
-        await callback.message.answer(
-            f"🏁 <b>Quiz yakunlandi!</b>\n\n"
-            f"📊 <b>Natijalar:</b>\n"
-            f"├ Jami savollar:       <b>{total}</b>\n"
-            f"├ To'g'ri javoblar:    <b>{correct} ✅</b>\n"
-            f"├ Noto'g'ri javoblar:  <b>{wrong} ❌</b>\n"
-            f"└ Natija:              <b>{percentage:.1f}%</b>\n\n"
-            f"{motivation}",
-            reply_markup=after_quiz_keyboard(),
-            parse_mode="HTML",
-        )
-        await state.clear()
-
-    await callback.answer()
-
-
-@router.callback_query(F.data == "cancel_quiz")
-async def cancel_quiz(callback: CallbackQuery, state: FSMContext):
-    """Quizni bekor qilish"""
-    await state.clear()
-    try:
-        await callback.message.edit_text(
-            "❌ Quiz bekor qilindi.\n\n🏠 Bosh menyu:",
-            reply_markup=main_menu_keyboard(),
-        )
-    except Exception:
-        await callback.message.answer(
-            "❌ Quiz bekor qilindi.\n\n🏠 Bosh menyu:",
-            reply_markup=main_menu_keyboard(),
-        )
-    await callback.answer()
+        return "📚 Ko'proq takrorlash kerak."
